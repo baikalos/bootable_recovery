@@ -61,23 +61,20 @@ int Menu::selection() const {
   return selection_;
 }
 
-TextMenu::TextMenu(bool scrollable, size_t max_items, size_t max_length,
+TextMenu::TextMenu(bool wrappable, size_t max_length,
                    const std::vector<std::string>& headers, const std::vector<std::string>& items,
                    size_t initial_selection, int char_height, const DrawInterface& draw_funcs)
     : Menu(initial_selection, draw_funcs),
-      scrollable_(scrollable),
-      max_display_items_(max_items),
+      wrappable_(wrappable),
+      calibrated_height_(false),
       max_item_length_(max_length),
       text_headers_(headers),
       char_height_(char_height) {
-  CHECK_LE(max_items, static_cast<size_t>(std::numeric_limits<int>::max()));
 
-  // It's fine to have more entries than text_rows_ if scrollable menu is supported.
-  size_t items_count = scrollable_ ? items.size() : std::min(items.size(), max_display_items_);
+  size_t items_count = items.size();
   for (size_t i = 0; i < items_count; ++i) {
     text_items_.emplace_back(items[i].substr(0, max_item_length_));
   }
-  menu_start_ = std::max(0, (int)selection_ - (int)max_display_items_ + 1);
 
   CHECK(!text_items_.empty());
 }
@@ -105,7 +102,7 @@ size_t TextMenu::ItemsCount() const {
 }
 
 bool TextMenu::ItemsOverflow(std::string* cur_selection_str) const {
-  if (!scrollable_ || ItemsCount() <= max_display_items_) {
+  if (ItemsCount() <= max_display_items_) {
     return false;
   }
 
@@ -121,32 +118,20 @@ int TextMenu::Select(int sel) {
 
   int min = IsMain() ? 0 : -1; // -1 is back arrow
 
-  // Wraps the selection at boundary if the menu is not scrollable.
-  if (!scrollable_) {
-    if (sel < min) {
-      selection_ = count - 1;
-    } else if (sel >= count) {
-      selection_ = min;
-    } else {
-      selection_ = sel;
-    }
-
-    return selection_;
+  if (sel < min) {
+    selection_ = wrappable() ? count - 1 : min;
+  } else if (sel >= count) {
+    selection_ = wrappable() ? min : count - 1;
+  } else {
+    selection_ = sel;
   }
 
-  if (sel < min) {
-    selection_ = min;
-  } else if (sel >= count) {
-    selection_ = count - 1;
-  } else {
-    if (sel >= 0) {
-      if (static_cast<size_t>(sel) < menu_start_) {
-        menu_start_--;
-      } else if (static_cast<size_t>(sel) >= MenuEnd()) {
-        menu_start_++;
-      }
+  if (selection_ >= 0) {
+    if (selection_ < menu_start_) {
+      menu_start_ = selection_;
+    } else if (static_cast<size_t>(selection_) >= MenuEnd()) {
+      menu_start_ = selection_ - max_display_items_ + 1;
     }
-    selection_ = sel;
   }
 
   return selection_;
@@ -154,7 +139,7 @@ int TextMenu::Select(int sel) {
 
 int TextMenu::SelectVisible(int relative_sel) {
   int sel = relative_sel;
-  if (scrollable_ && menu_start_ > 0) {
+  if (menu_start_ > 0) {
     sel += menu_start_;
   }
 
@@ -162,8 +147,6 @@ int TextMenu::SelectVisible(int relative_sel) {
 }
 
 int TextMenu::Scroll(int updown) {
-  if(!scrollable_) return selection_;
-
   if ((updown > 0 && menu_start_ + max_display_items_ < ItemsCount()) ||
       (updown < 0 && menu_start_ > 0)) {
     menu_start_ += updown;
@@ -184,11 +167,7 @@ int TextMenu::DrawHeader(int x, int y) const {
   int offset = 0;
 
   draw_funcs_.SetColor(UIElement::HEADER);
-  if (!scrollable()) {
-    offset += draw_funcs_.DrawWrappedTextLines(x, y + offset, text_headers());
-  } else {
-    offset += draw_funcs_.DrawTextLines(x, y + offset, text_headers());
-  }
+  offset += draw_funcs_.DrawWrappedTextLines(x, y + offset, text_headers());
 
   return offset;
 }
@@ -203,7 +182,6 @@ int TextMenu::DrawItems(int x, int y, int screen_width, bool long_press) const {
   int item_container_offset = offset; // store it for drawing scrollbar on most top
 
   for (size_t i = MenuStart(); i < MenuEnd(); ++i) {
-    bool bold = false;
     if (i == selection()) {
       // Draw the highlight bar.
       draw_funcs_.SetColor(long_press ? UIElement::MENU_SEL_BG_ACTIVE : UIElement::MENU_SEL_BG);
@@ -211,11 +189,10 @@ int TextMenu::DrawItems(int x, int y, int screen_width, bool long_press) const {
       int bar_height = padding + char_height_ + padding;
       draw_funcs_.DrawHighlightBar(0, y + offset, screen_width, bar_height);
 
-      // Bold white text for the selected item.
+      // Colored text for the selected item.
       draw_funcs_.SetColor(UIElement::MENU_SEL_FG);
-      bold = true;
     }
-    offset += draw_funcs_.DrawTextLine(x, y + offset, TextItem(i), bold);
+    offset += draw_funcs_.DrawTextLine(x, y + offset, TextItem(i), false /* bold */);
 
     draw_funcs_.SetColor(UIElement::MENU);
   }
@@ -384,13 +361,11 @@ int MenuDrawFunctions::DrawWrappedTextLines(int x, int y, const std::vector<std:
   return offset;
 }
 
-ScreenRecoveryUI::ScreenRecoveryUI() : ScreenRecoveryUI(true) {}
-
 constexpr int kDefaultMarginHeight = 0;
 constexpr int kDefaultMarginWidth = 0;
 constexpr int kDefaultAnimationFps = 30;
 
-ScreenRecoveryUI::ScreenRecoveryUI(bool scrollable_menu)
+ScreenRecoveryUI::ScreenRecoveryUI()
     : margin_width_(
           android::base::GetIntProperty("ro.recovery.ui.margin_width", kDefaultMarginWidth)),
       margin_height_(
@@ -415,7 +390,6 @@ ScreenRecoveryUI::ScreenRecoveryUI(bool scrollable_menu)
       text_row_(0),
       show_text(false),
       show_text_ever(false),
-      scrollable_menu_(scrollable_menu),
       file_viewer_text_(nullptr),
       stage(-1),
       max_stage(-1),
@@ -576,25 +550,42 @@ void ScreenRecoveryUI::draw_foreground_locked() {
   }
 }
 
-/* Lineage teal: #167c80 */
+/* recovery dark:  #7C4DFF
+   recovery light: #F890FF
+   fastbootd dark: #E65100
+   fastboot light: #FDD835 */
 void ScreenRecoveryUI::SetColor(UIElement e) const {
   switch (e) {
     case UIElement::INFO:
-      gr_color(249, 194, 0, 255);
+      if (fastbootd_logo_enabled_)
+        gr_color(0xfd, 0xd8, 0x35, 255);
+      else
+        gr_color(0xf8, 0x90, 0xff, 255);
       break;
     case UIElement::HEADER:
-      gr_color(247, 0, 6, 255);
+      if (fastbootd_logo_enabled_)
+        gr_color(0xfd, 0xd8,0x35, 255);
+      else
+        gr_color(0xf8, 0x90, 0xff, 255);
       break;
     case UIElement::MENU:
-    case UIElement::MENU_SEL_BG:
       gr_color(0xd8, 0xd8, 0xd8, 255);
+      break;
+    case UIElement::MENU_SEL_BG:
+    case UIElement::SCROLLBAR:
+      if (fastbootd_logo_enabled_)
+        gr_color(0xe6, 0x51, 0x00, 255);
+      else
+        gr_color(0x7c, 0x4d, 0xff, 255);
       break;
     case UIElement::MENU_SEL_BG_ACTIVE:
       gr_color(0, 156, 100, 255);
       break;
     case UIElement::MENU_SEL_FG:
-    case UIElement::SCROLLBAR:
-      gr_color(0x16, 0x7c, 0x80, 255);
+      if (fastbootd_logo_enabled_)
+        gr_color(0, 0, 0, 255);
+      else
+        gr_color(0xd8, 0xd8, 0xd8, 255);
       break;
     case UIElement::LOG:
       gr_color(196, 196, 196, 255);
@@ -788,14 +779,17 @@ void ScreenRecoveryUI::draw_screen_locked() {
 
   // clang-format off
   static std::vector<std::string> REGULAR_HELP{
-    "Use volume up/down and power.",
+    "Use the volume up/down keys to navigate.",
+    "Use the power key to select.",
   };
   static std::vector<std::string> LONG_PRESS_HELP{
     "Any button cycles highlight.",
     "Long-press activates.",
   };
+  static const std::vector<std::string> NO_HELP = {};
   // clang-format on
-  draw_menu_and_text_buffer_locked(HasThreeButtons() ? REGULAR_HELP : LONG_PRESS_HELP);
+  draw_menu_and_text_buffer_locked(
+      HasTouchScreen() ? NO_HELP : HasThreeButtons() ? REGULAR_HELP : LONG_PRESS_HELP);
 }
 
 // Draws the menu and text buffer on the screen. Should only be called with updateMutex locked.
@@ -803,45 +797,37 @@ void ScreenRecoveryUI::draw_menu_and_text_buffer_locked(
     const std::vector<std::string>& help_message) {
   int y = margin_height_;
 
-  if (fastbootd_logo_ && fastbootd_logo_enabled_) {
-    // Try to get this centered on screen.
-    auto width = gr_get_width(fastbootd_logo_.get());
-    auto height = gr_get_height(fastbootd_logo_.get());
-    auto centered_x = ScreenWidth() / 2 - width / 2;
-    DrawSurface(fastbootd_logo_.get(), 0, 0, width, height, centered_x, y);
-    y += height;
-  }
-
   if (menu_) {
-    int x = margin_width_ + kMenuIndent;
+    auto& logo = fastbootd_logo_enabled_ ? fastbootd_logo_ : lineage_logo_;
+    auto logo_width = gr_get_width(logo.get());
+    auto logo_height = gr_get_height(logo.get());
+    auto centered_x = ScreenWidth() / 2 - logo_width / 2;
+    DrawSurface(logo.get(), 0, 0, logo_width, logo_height, centered_x, y);
+    y += logo_height;
 
-    SetColor(UIElement::INFO);
-
-    if (lineage_logo_ && back_icon_) {
-      auto logo_width = gr_get_width(lineage_logo_.get());
-      auto logo_height = gr_get_height(lineage_logo_.get());
-      auto centered_x = ScreenWidth() / 2 - logo_width / 2;
-      DrawSurface(lineage_logo_.get(), 0, 0, logo_width, logo_height, centered_x, y);
-      y += logo_height;
-
-      if (!menu_->IsMain()) {
-        auto icon_w = gr_get_width(back_icon_.get());
-        auto icon_h = gr_get_height(back_icon_.get());
-        auto icon_x = centered_x / 2 - icon_w / 2;
-        auto icon_y = y - logo_height / 2 - icon_h / 2;
-        gr_blit(back_icon_sel_ && menu_->selection() == -1 ? back_icon_sel_.get() : back_icon_.get(),
-                0, 0, icon_w, icon_h, icon_x, icon_y);
-      }
-    } else {
-      for (size_t i = 0; i < title_lines_.size(); i++) {
-        y += DrawTextLine(x, y, title_lines_[i], i == 0);
-      }
-      y += DrawTextLines(x, y, help_message);
+    if (!menu_->IsMain()) {
+      auto icon_w = gr_get_width(back_icon_.get());
+      auto icon_h = gr_get_height(back_icon_.get());
+      auto icon_x = centered_x / 2 - icon_w / 2;
+      auto icon_y = y - logo_height / 2 - icon_h / 2;
+      gr_blit(back_icon_sel_ && menu_->selection() == -1 ? back_icon_sel_.get() : back_icon_.get(),
+              0, 0, icon_w, icon_h, icon_x, icon_y);
     }
 
+    int x = margin_width_ + kMenuIndent;
+    if (!title_lines_.empty()) {
+      SetColor(UIElement::INFO);
+      y += DrawTextLines(x, y, title_lines_);
+    }
     y += menu_->DrawHeader(x, y);
     menu_start_y_ = y + 12; // Skip horizontal rule and some margin
+    menu_->SetMenuHeight(std::max(0, ScreenHeight() - menu_start_y_));
     y += menu_->DrawItems(x, y, ScreenWidth(), IsLongPress());
+    if (!help_message.empty()) {
+      y += MenuItemPadding();
+      SetColor(UIElement::INFO);
+      y += DrawTextLines(x, y, help_message);
+    }
   }
 
   // Display from the bottom up, until we hit the top of the screen, the bottom of the menu, or
@@ -1025,12 +1011,14 @@ bool ScreenRecoveryUI::Init(const std::string& locale) {
   no_command_text_ = LoadLocalizedBitmap("no_command_text");
   error_text_ = LoadLocalizedBitmap("error_text");
 
-  lineage_logo_ = LoadBitmap("logo_image");
   back_icon_ = LoadBitmap("ic_back");
   back_icon_sel_ = LoadBitmap("ic_back_sel");
   if (android::base::GetBoolProperty("ro.boot.dynamic_partitions", false) ||
       android::base::GetBoolProperty("ro.fastbootd.available", false)) {
+    lineage_logo_ = LoadBitmap("logo_image_switch");
     fastbootd_logo_ = LoadBitmap("fastbootd");
+  } else {
+    lineage_logo_ = LoadBitmap("logo_image");
   }
 
   // Background text for "installing_update" could be "installing update" or
@@ -1301,11 +1289,9 @@ std::unique_ptr<Menu> ScreenRecoveryUI::CreateMenu(const std::vector<std::string
                                                    size_t initial_selection) const {
   int menu_char_width = MenuCharWidth();
   int menu_char_height = MenuCharHeight();
-  int menu_item_padding = MenuItemPadding();
-  int menu_rows = (ScreenHeight() - margin_height_*2 - gr_get_height(lineage_logo_.get()))
-                  / (menu_char_height + 2 * menu_item_padding) - text_headers.size();
   int menu_cols = (ScreenWidth() - margin_width_*2 - kMenuIndent) / menu_char_width;
-  return std::make_unique<TextMenu>(scrollable_menu_, menu_rows, menu_cols, text_headers, text_items,
+  bool wrap_selection = !HasThreeButtons() && !HasTouchScreen();
+  return std::make_unique<TextMenu>(wrap_selection, menu_cols, text_headers, text_items,
                                     initial_selection, menu_char_height, *menu_draw_funcs_);
 }
 
